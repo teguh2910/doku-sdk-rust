@@ -121,7 +121,7 @@ pub async fn checkout(
         },
         payment: Some(CheckoutPayment {
             payment_due_date: req.payment_due_date.or(Some(60)),
-            payment_method_types: None,
+            payment_method_types: req.payment_method_types.filter(|v| !v.is_empty()),
         }),
         customer: {
             let customer_name = {

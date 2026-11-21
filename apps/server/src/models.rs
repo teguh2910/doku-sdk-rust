@@ -9,6 +9,7 @@ pub struct CreateCheckoutRequest {
     pub callback_url: Option<String>,
     pub auto_redirect: Option<bool>,
     pub payment_due_date: Option<u32>,
+    pub payment_method_types: Option<Vec<String>>,
     pub customer_name: String,
     pub customer_email: String,
     pub customer_phone: Option<String>,
