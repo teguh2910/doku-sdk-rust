@@ -24,7 +24,7 @@ pub struct CheckoutRequest {
 pub struct CheckoutPaymentResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(alias = "token_id", skip_serializing_if = "Option::is_none")]
     pub token: Option<String>,
 }
 
@@ -35,7 +35,7 @@ pub struct CheckoutResponseBody {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub payment: Option<CheckoutPaymentResult>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub uuid: Option<String>,
+    pub uuid: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub headers: Option<serde_json::Value>,
 }

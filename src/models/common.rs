@@ -12,9 +12,42 @@ pub struct Customer {
     pub country: Option<String>,
 }
 
+pub fn deserialize_string_or_u64<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let val = serde_json::Value::deserialize(deserializer)?;
+    match val {
+        serde_json::Value::Number(num) => num
+            .as_u64()
+            .ok_or_else(|| serde::de::Error::custom("invalid u64 number")),
+        serde_json::Value::String(s) => s.parse::<u64>().map_err(serde::de::Error::custom),
+        _ => Err(serde::de::Error::custom("expected number or string")),
+    }
+}
+
+pub fn deserialize_opt_string_or_u64<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let opt = Option::<serde_json::Value>::deserialize(deserializer)?;
+    match opt {
+        Some(serde_json::Value::Number(num)) => num
+            .as_u64()
+            .ok_or_else(|| serde::de::Error::custom("invalid u64 number"))
+            .map(Some),
+        Some(serde_json::Value::String(s)) => {
+            s.parse::<u64>().map_err(serde::de::Error::custom).map(Some)
+        }
+        Some(serde_json::Value::Null) | None => Ok(None),
+        _ => Err(serde::de::Error::custom("expected number or string")),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LineItem {
     pub name: String,
+    #[serde(deserialize_with = "deserialize_string_or_u64")]
     pub price: u64,
     pub quantity: u32,
 }
@@ -22,7 +55,11 @@ pub struct LineItem {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Order {
     pub invoice_number: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "deserialize_opt_string_or_u64"
+    )]
     pub amount: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub currency: Option<String>,
