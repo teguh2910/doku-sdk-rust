@@ -64,15 +64,49 @@ pub async fn checkout(
         );
     }
 
-    let line_items = req.line_items.map(|items| {
-        items
-            .into_iter()
-            .map(|item| LineItem {
-                name: item.name,
-                price: item.price,
-                quantity: item.quantity,
-            })
-            .collect()
+    let line_items = req.line_items.and_then(|items| {
+        if items.is_empty() {
+            return None;
+        }
+        let sum: u64 = items
+            .iter()
+            .map(|i| i.price.saturating_mul(i.quantity as u64))
+            .sum();
+
+        if sum == amount {
+            Some(
+                items
+                    .into_iter()
+                    .map(|item| LineItem {
+                        name: item.name,
+                        price: item.price,
+                        quantity: item.quantity,
+                    })
+                    .collect(),
+            )
+        } else if sum < amount {
+            let diff = amount - sum;
+            let mut list: Vec<LineItem> = items
+                .into_iter()
+                .map(|item| LineItem {
+                    name: item.name,
+                    price: item.price,
+                    quantity: item.quantity,
+                })
+                .collect();
+            list.push(LineItem {
+                name: "Biaya Layanan / Pembayaran".to_string(),
+                price: diff,
+                quantity: 1,
+            });
+            Some(list)
+        } else {
+            Some(vec![LineItem {
+                name: "Total Tagihan".to_string(),
+                price: amount,
+                quantity: 1,
+            }])
+        }
     });
 
     let checkout_req = CheckoutRequest {
