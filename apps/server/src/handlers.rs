@@ -89,12 +89,43 @@ pub async fn checkout(
             payment_due_date: req.payment_due_date.or(Some(60)),
             payment_method_types: None,
         }),
-        customer: Customer {
-            name: req.customer_name,
-            email: req.customer_email,
-            phone: req.customer_phone,
-            address: req.customer_address,
-            country: Some("ID".to_string()),
+        customer: {
+            let customer_name = {
+                let trimmed = req.customer_name.trim();
+                if trimmed.is_empty() {
+                    "Customer".to_string()
+                } else {
+                    trimmed.to_string()
+                }
+            };
+            let customer_email = {
+                let trimmed = req.customer_email.trim();
+                if trimmed.is_empty() || !trimmed.contains('@') {
+                    "customer@topup-odgj.id".to_string()
+                } else {
+                    trimmed.to_string()
+                }
+            };
+            let customer_phone = req.customer_phone.and_then(|p| {
+                let clean: String = p.chars().filter(|c| c.is_ascii_digit() || *c == '+').collect();
+                let digits_only: String = clean.chars().filter(|c| c.is_ascii_digit()).collect();
+                if digits_only.is_empty() || digits_only.len() > 20 {
+                    None
+                } else {
+                    Some(clean)
+                }
+            });
+
+            Customer {
+                name: customer_name,
+                email: customer_email,
+                phone: customer_phone,
+                address: req.customer_address.and_then(|a| {
+                    let t = a.trim().to_string();
+                    if t.is_empty() { None } else { Some(t) }
+                }),
+                country: Some("ID".to_string()),
+            }
         },
         additional_info: None,
     };

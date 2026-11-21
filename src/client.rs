@@ -344,20 +344,51 @@ impl DokuClient {
         let raw_body = res.text().await?;
 
         if !status.is_success() {
-            let code = serde_json::from_str::<serde_json::Value>(&raw_body)
+            let (code, msg_detail) = serde_json::from_str::<serde_json::Value>(&raw_body)
                 .ok()
-                .and_then(|v| {
-                    v.get("error")
+                .map(|v| {
+                    let c = v
+                        .get("error")
                         .and_then(|e| e.get("code"))
                         .or_else(|| v.get("responseCode"))
                         .and_then(|c| c.as_str())
-                        .map(String::from)
-                });
+                        .map(String::from);
+
+                    let m = if let Some(arr) = v.get("message").and_then(|m| m.as_array()) {
+                        let msgs: Vec<&str> = arr.iter().filter_map(|x| x.as_str()).collect();
+                        if !msgs.is_empty() {
+                            Some(msgs.join(", "))
+                        } else {
+                            None
+                        }
+                    } else if let Some(m_str) = v.get("message").and_then(|m| m.as_str()) {
+                        Some(m_str.to_string())
+                    } else if let Some(e_msg) = v
+                        .get("error")
+                        .and_then(|e| e.get("message"))
+                        .and_then(|m| m.as_str())
+                    {
+                        Some(e_msg.to_string())
+                    } else if let Some(rm) = v.get("responseMessage").and_then(|m| m.as_str()) {
+                        Some(rm.to_string())
+                    } else {
+                        None
+                    };
+
+                    (c, m)
+                })
+                .unwrap_or((None, None));
+
+            let message = if let Some(detail) = msg_detail {
+                format!("{}: {}", status, detail)
+            } else {
+                format!("{}", status)
+            };
 
             return Err(DokuError::Api {
                 status: status.as_u16(),
                 code,
-                message: format!("DOKU API returned status HTTP {}", status),
+                message,
                 raw_body,
             });
         }
