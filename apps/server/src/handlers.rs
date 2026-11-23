@@ -164,7 +164,34 @@ pub async fn checkout(
         additional_info: None,
     };
 
-    match state.client.checkout().initiate_payment(&checkout_req).await {
+    let res = match state.client.checkout().initiate_payment(&checkout_req).await {
+        Ok(resp) => Ok(resp),
+        Err(err) => {
+            let err_str = err.to_string();
+            if (err_str.to_uppercase().contains("INACTIVE") || err_str.contains("400 Bad Request"))
+                && checkout_req
+                    .payment
+                    .as_ref()
+                    .and_then(|p| p.payment_method_types.as_ref())
+                    .is_some()
+            {
+                tracing::warn!(
+                    error = %err_str,
+                    invoice = %invoice_number,
+                    "payment channel inactive or unsupported; falling back to open DOKU checkout"
+                );
+                let mut fallback_req = checkout_req.clone();
+                if let Some(payment) = fallback_req.payment.as_mut() {
+                    payment.payment_method_types = None;
+                }
+                state.client.checkout().initiate_payment(&fallback_req).await
+            } else {
+                Err(err)
+            }
+        }
+    };
+
+    match res {
         Ok(resp) => {
             if let Some(payment) = resp.response.as_ref().and_then(|r| r.payment.as_ref()) {
                 let url = payment.url.clone().unwrap_or_default();
@@ -287,7 +314,7 @@ pub async fn verify_notification(
     State(state): State<Arc<AppState>>,
     Json(req): Json<VerifyNotificationRequest>,
 ) -> impl IntoResponse {
-    let is_valid = if state.config.mock_mode && req.signature == "test_valid_signature" {
+    let mut is_valid = if state.config.mock_mode && req.signature == "test_valid_signature" {
         true
     } else {
         state.client.webhook().verify_direct(
@@ -299,6 +326,31 @@ pub async fn verify_notification(
             &req.signature,
         )
     };
+
+    // If signature failed with the provided path, try common alias notification paths
+    if !is_valid && !state.config.mock_mode {
+        let candidate_paths = [
+            "/api/v1/payments/doku/notification",
+            "/api/payments/doku/notification",
+            "/payments/doku/notification",
+            "/doku/notification",
+        ];
+        for candidate in candidate_paths {
+            if candidate != req.path {
+                if state.client.webhook().verify_direct(
+                    &req.client_id,
+                    &req.request_id,
+                    &req.timestamp,
+                    candidate,
+                    &req.body,
+                    &req.signature,
+                ) {
+                    is_valid = true;
+                    break;
+                }
+            }
+        }
+    }
 
     if !is_valid {
         return (
@@ -315,49 +367,150 @@ pub async fn verify_notification(
         );
     }
 
+    let raw_val: Result<serde_json::Value, _> = serde_json::from_str(&req.body);
     let parsed: Result<DirectWebhookNotification, _> = serde_json::from_str(&req.body);
-    match parsed {
-        Ok(notif) => {
-            let invoice = notif.order.as_ref().map(|o| o.invoice_number.clone());
-            let status = notif
+
+    let (invoice, status, amount, date, raw) = match (parsed, raw_val) {
+        (Ok(notif), Ok(raw)) => {
+            let inv = notif
+                .order
+                .as_ref()
+                .map(|o| o.invoice_number.clone())
+                .or_else(|| {
+                    raw.get("order")
+                        .and_then(|o| o.get("invoice_number"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                })
+                .or_else(|| {
+                    raw.get("invoice_number")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                });
+
+            let stat = notif
+                .transaction
+                .as_ref()
+                .and_then(|t| t.status.clone())
+                .or_else(|| {
+                    raw.get("transaction")
+                        .and_then(|t| t.get("status"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                })
+                .or_else(|| {
+                    raw.get("status")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                })
+                .unwrap_or_else(|| "SUCCESS".to_string());
+
+            let amt = notif
+                .order
+                .as_ref()
+                .and_then(|o| o.amount)
+                .or_else(|| {
+                    raw.get("order")
+                        .and_then(|o| o.get("amount"))
+                        .and_then(|v| v.as_u64())
+                })
+                .or_else(|| raw.get("amount").and_then(|v| v.as_u64()));
+
+            let dt = notif
+                .transaction
+                .as_ref()
+                .and_then(|t| t.date.clone())
+                .or_else(|| {
+                    raw.get("transaction")
+                        .and_then(|t| t.get("date"))
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                });
+
+            (inv, stat, amt, dt, Some(raw))
+        }
+        (Ok(notif), Err(_)) => {
+            let inv = notif.order.as_ref().map(|o| o.invoice_number.clone());
+            let stat = notif
                 .transaction
                 .as_ref()
                 .and_then(|t| t.status.clone())
                 .unwrap_or_else(|| "SUCCESS".to_string());
-            let amount = notif.order.as_ref().and_then(|o| o.amount);
-            let date = notif.transaction.as_ref().and_then(|t| t.date.clone());
+            let amt = notif.order.as_ref().and_then(|o| o.amount);
+            let dt = notif.transaction.as_ref().and_then(|t| t.date.clone());
+            (inv, stat, amt, dt, None)
+        }
+        (Err(_), Ok(raw)) => {
+            let inv = raw
+                .get("order")
+                .and_then(|o| o.get("invoice_number"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .or_else(|| {
+                    raw.get("invoice_number")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                });
 
-            if let Some(ref inv) = invoice {
-                let mut orders = state.mock_orders.write().await;
-                if let Some(ord) = orders.get_mut(inv) {
-                    ord.status = status.clone();
-                }
-            }
+            let stat = raw
+                .get("transaction")
+                .and_then(|t| t.get("status"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .or_else(|| {
+                    raw.get("status")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                })
+                .unwrap_or_else(|| "SUCCESS".to_string());
 
-            (
-                StatusCode::OK,
+            let amt = raw
+                .get("order")
+                .and_then(|o| o.get("amount"))
+                .and_then(|v| v.as_u64())
+                .or_else(|| raw.get("amount").and_then(|v| v.as_u64()));
+
+            let dt = raw
+                .get("transaction")
+                .and_then(|t| t.get("date"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+
+            (inv, stat, amt, dt, Some(raw))
+        }
+        (Err(err), Err(_)) => {
+            return (
+                StatusCode::BAD_REQUEST,
                 Json(VerifyNotificationResponse {
                     valid: true,
-                    invoice_number: invoice,
-                    status: Some(status),
-                    amount,
-                    date,
-                    error: None,
-                    raw: Some(notif.raw),
+                    invoice_number: None,
+                    status: None,
+                    amount: None,
+                    date: None,
+                    error: Some(format!("Failed to parse notification JSON: {}", err)),
+                    raw: None,
                 }),
-            )
+            );
         }
-        Err(err) => (
-            StatusCode::BAD_REQUEST,
-            Json(VerifyNotificationResponse {
-                valid: true,
-                invoice_number: None,
-                status: None,
-                amount: None,
-                date: None,
-                error: Some(format!("Failed to parse notification JSON: {}", err)),
-                raw: None,
-            }),
-        ),
+    };
+
+    if let Some(ref inv) = invoice {
+        let mut orders = state.mock_orders.write().await;
+        if let Some(ord) = orders.get_mut(inv) {
+            ord.status = status.clone();
+        }
     }
+
+    (
+        StatusCode::OK,
+        Json(VerifyNotificationResponse {
+            valid: true,
+            invoice_number: invoice,
+            status: Some(status),
+            amount,
+            date,
+            error: None,
+            raw,
+        }),
+    )
 }
